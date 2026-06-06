@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"math/rand"
 	"net/http"
@@ -66,6 +67,7 @@ var (
 	languageRegex            = regexp.MustCompile(`"TuX5cc":"([^"]+)"`)
 	modelIDRegex             = regexp.MustCompile(`gemini-[a-zA-Z0-9.-]+`)
 	validModelPrefixRegex    = regexp.MustCompile(`^gemini-(\d|advanced)`)
+	imageURLRegex            = regexp.MustCompile(`(?i)(?:https?:)?//[^\s"'<>\\]+|(?:[a-z0-9.-]+\.)?googleusercontent\.com/[^\s"'<>\\]+`)
 )
 
 func NewClient(cfg *configs.Config, log *zap.Logger) *Client {
@@ -506,14 +508,9 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 		}
 	}
 
-	// Strictly enforce that we only use models found/confirmed from the web
-	found := false
-	for _, m := range c.cachedModels {
-		if m.ID == config.Model {
-			found = true
-			break
-		}
-	}
+	requestedModel := config.Model
+	resolvedModel, found := resolveAvailableModel(requestedModel, c.cachedModels)
+	config.Model = resolvedModel
 	at := c.at
 	cookieHdr := c.cookieHeader
 	buildLabel := c.buildLabel
@@ -524,8 +521,8 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 		language = "en"
 	}
 
-	if !found && config.Model != "" {
-		return nil, fmt.Errorf("model '%s' is not supported or not available. Available models: %v", config.Model, c.ListModelsIDs())
+	if !found && requestedModel != "" {
+		return nil, fmt.Errorf("model '%s' is not supported or not available. Available models: %v", requestedModel, c.ListModelsIDs())
 	}
 
 	if at == "" {
@@ -679,6 +676,32 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 	return nil, fmt.Errorf("after %d attempts: %w", maxAttempts, lastErr)
 }
 
+func resolveAvailableModel(requested string, models []ModelInfo) (string, bool) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return "", false
+	}
+
+	for _, model := range models {
+		if model.ID == requested {
+			return model.ID, true
+		}
+	}
+
+	var matches []string
+	prefix := requested + "-"
+	for _, model := range models {
+		if strings.HasPrefix(model.ID, prefix) {
+			matches = append(matches, model.ID)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+
+	return requested, false
+}
+
 func buildGenerateInner(prompt string, files []uploadedFile, model, language, requestID string) []interface{} {
 	if len(files) == 0 {
 		return []interface{}{
@@ -783,6 +806,7 @@ func (c *Client) parseResponse(text string) (*Response, error) {
 	var finalResText string
 	var finalMetadata map[string]any
 	found := false
+	imagesByURL := make(map[string]Image)
 
 	lines := strings.Split(text, "\n")
 	for _, line := range lines {
@@ -809,6 +833,7 @@ func (c *Client) parseResponse(text string) (*Response, error) {
 				if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
 					continue
 				}
+				collectImages(payload, imagesByURL)
 
 				if len(payload) > 4 {
 					candidates, ok := payload[4].([]interface{})
@@ -848,9 +873,14 @@ func (c *Client) parseResponse(text string) (*Response, error) {
 		}
 	}
 
-	if found {
+	if found || len(imagesByURL) > 0 {
+		images := make([]Image, 0, len(imagesByURL))
+		for _, image := range imagesByURL {
+			images = append(images, image)
+		}
 		return &Response{
 			Text:     finalResText,
+			Images:   images,
 			Metadata: finalMetadata,
 		}, nil
 	}
@@ -860,6 +890,101 @@ func (c *Client) parseResponse(text string) (*Response, error) {
 		sample = sample[:500]
 	}
 	return nil, fmt.Errorf("failed to parse response. Sample: %s", sample)
+}
+
+func collectImages(value any, out map[string]Image) {
+	switch v := value.(type) {
+	case []interface{}:
+		for _, item := range v {
+			collectImages(item, out)
+		}
+	case map[string]interface{}:
+		for _, item := range v {
+			collectImages(item, out)
+		}
+	case string:
+		for _, rawURL := range imageURLRegex.FindAllString(v, -1) {
+			imageURL := normalizeImageURL(rawURL)
+			if imageURL == "" {
+				continue
+			}
+			if _, exists := out[imageURL]; exists {
+				continue
+			}
+			out[imageURL] = Image{
+				URL:      imageURL,
+				MimeType: mimeTypeFromImageURL(imageURL),
+			}
+		}
+	}
+}
+
+func normalizeImageURL(rawURL string) string {
+	cleaned := html.UnescapeString(strings.TrimSpace(rawURL))
+	cleaned = strings.TrimRight(cleaned, ".,);]")
+	if strings.HasPrefix(cleaned, "//") {
+		cleaned = "https:" + cleaned
+	}
+	lowerCleaned := strings.ToLower(cleaned)
+	if strings.HasPrefix(lowerCleaned, "googleusercontent.com/") || strings.HasSuffix(strings.SplitN(lowerCleaned, "/", 2)[0], ".googleusercontent.com") {
+		cleaned = "https://" + cleaned
+	}
+	parsed, err := url.Parse(cleaned)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	if !looksLikeImageURL(parsed) {
+		return ""
+	}
+	if strings.Contains(strings.ToLower(parsed.Hostname()), "googleusercontent.com") {
+		parsed.Scheme = "https"
+	}
+	return parsed.String()
+}
+
+func looksLikeImageURL(u *url.URL) bool {
+	host := strings.ToLower(u.Hostname())
+	path := strings.ToLower(u.EscapedPath())
+
+	if strings.HasSuffix(path, ".svg") || strings.Contains(host, "fonts.gstatic.com") {
+		return false
+	}
+	if host == "googleusercontent.com" {
+		return false
+	}
+	if strings.HasSuffix(host, ".googleusercontent.com") {
+		return true
+	}
+	switch {
+	case strings.HasSuffix(path, ".png"),
+		strings.HasSuffix(path, ".jpg"),
+		strings.HasSuffix(path, ".jpeg"),
+		strings.HasSuffix(path, ".webp"),
+		strings.HasSuffix(path, ".gif"):
+		return true
+	default:
+		return false
+	}
+}
+
+func mimeTypeFromImageURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	path := strings.ToLower(u.EscapedPath())
+	switch {
+	case strings.HasSuffix(path, ".png"):
+		return "image/png"
+	case strings.HasSuffix(path, ".jpg"), strings.HasSuffix(path, ".jpeg"):
+		return "image/jpeg"
+	case strings.HasSuffix(path, ".webp"):
+		return "image/webp"
+	case strings.HasSuffix(path, ".gif"):
+		return "image/gif"
+	default:
+		return ""
+	}
 }
 
 func (cs *CookieStore) ToHTTPCookies() []*http.Cookie {

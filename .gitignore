@@ -47,3 +47,7 @@ gemini-web-to-api.exe
 # Editor/IDE
 .idea/
 .vscode/
+
+
+# pycache
+examples/__pycache__/

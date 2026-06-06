@@ -133,8 +133,41 @@ func (h *OpenAIController) HandleChatCompletions(c fiber.Ctx) error {
 	return c.JSON(response)
 }
 
+// HandleImageGenerations accepts image generation requests in OpenAI format
+// @Summary Image Generations (OpenAI)
+// @Description Generates images from a text prompt.
+// @Tags OpenAI
+// @Accept json
+// @Produce json
+// @Param request body dto.ImageGenerationRequest true "Image Generation Request"
+// @Success 200 {object} dto.ImageGenerationResponse
+// @Failure 400 {object} map[string]interface{}
+// @Failure 500 {object} map[string]interface{}
+// @Router /openai/v1/images/generations [post]
+func (h *OpenAIController) HandleImageGenerations(c fiber.Ctx) error {
+	var req dto.ImageGenerationRequest
+	if err := c.Bind().Body(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(utils.ErrorToResponse(fmt.Errorf("invalid request body: %w", err), "invalid_request_error"))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	response, err := h.service.CreateImageGeneration(ctx, req)
+	if err != nil {
+		if err.Error() == "prompt is required" || err.Error() == "n must be between 1 and 10" {
+			return c.Status(fiber.StatusBadRequest).JSON(utils.ErrorToResponse(err, "invalid_request_error"))
+		}
+		h.log.Error("CreateImageGeneration failed", zap.Error(err), zap.String("model", req.Model))
+		return c.Status(fiber.StatusInternalServerError).JSON(utils.ErrorToResponse(err, "api_error"))
+	}
+
+	return c.JSON(response)
+}
+
 // Register registers the OpenAI routes onto the provided group
 func (c *OpenAIController) Register(group fiber.Router) {
 	group.Get("/models", c.HandleModels)
 	group.Post("/chat/completions", c.HandleChatCompletions)
+	group.Post("/images/generations", c.HandleImageGenerations)
 }

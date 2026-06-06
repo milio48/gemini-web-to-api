@@ -92,7 +92,20 @@ func (s *GeminiService) GenerateContent(ctx context.Context, modelID string, req
 			resParts = append(resParts, dto.Part{Text: content})
 		}
 	} else {
-		resParts = append(resParts, dto.Part{Text: response.Text})
+		if response.Text != "" {
+			resParts = append(resParts, dto.Part{Text: response.Text})
+		}
+		for _, image := range response.Images {
+			resParts = append(resParts, dto.Part{
+				FileData: &dto.FileData{
+					MimeType: image.MimeType,
+					FileURI:  image.URL,
+				},
+			})
+		}
+		if len(resParts) == 0 {
+			resParts = append(resParts, dto.Part{Text: ""})
+		}
 	}
 
 	return &dto.GeminiGenerateResponse{
