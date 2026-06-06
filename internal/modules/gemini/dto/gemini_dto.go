@@ -35,6 +35,7 @@ type Content struct {
 type Part struct {
 	Text             string            `json:"text,omitempty"`
 	InlineData       *InlineData       `json:"inline_data,omitempty"`
+	FileData         *FileData         `json:"file_data,omitempty"`
 	FunctionCall     *FunctionCall     `json:"function_call,omitempty"`
 	FunctionResponse *FunctionResponse `json:"function_response,omitempty"`
 }
@@ -44,6 +45,8 @@ func (p *Part) UnmarshalJSON(data []byte) error {
 		Text                  string            `json:"text"`
 		InlineDataSnake       *InlineData       `json:"inline_data"`
 		InlineDataCamel       *InlineData       `json:"inlineData"`
+		FileDataSnake         *FileData         `json:"file_data"`
+		FileDataCamel         *FileData         `json:"fileData"`
 		FunctionCallSnake     *FunctionCall     `json:"function_call"`
 		FunctionCallCamel     *FunctionCall     `json:"functionCall"`
 		FunctionResponseSnake *FunctionResponse `json:"function_response"`
@@ -56,6 +59,10 @@ func (p *Part) UnmarshalJSON(data []byte) error {
 	p.InlineData = raw.InlineDataSnake
 	if p.InlineData == nil {
 		p.InlineData = raw.InlineDataCamel
+	}
+	p.FileData = raw.FileDataSnake
+	if p.FileData == nil {
+		p.FileData = raw.FileDataCamel
 	}
 	p.FunctionCall = raw.FunctionCallSnake
 	if p.FunctionCall == nil {
@@ -107,6 +114,12 @@ type FunctionCallingConfig struct {
 type InlineData struct {
 	MimeType string `json:"mimeType"`
 	Data     string `json:"data"`
+}
+
+// FileData represents file data referenced by URI.
+type FileData struct {
+	MimeType string `json:"mimeType,omitempty"`
+	FileURI  string `json:"fileUri"`
 }
 
 func (d *InlineData) UnmarshalJSON(data []byte) error {
